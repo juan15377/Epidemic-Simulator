@@ -4,7 +4,7 @@ using Random
 using SparseArrays
 using JLD2
 using Distributions
-
+using Colors
 
 const HEALTHY = :healthy 
 const INFECTED = :infected
