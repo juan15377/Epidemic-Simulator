@@ -13,42 +13,98 @@ const DEAD = :dead
 
 const STATES = [HEALTHY, INFECTED, INMUNIZED, DEAD]
 
+mutable struct ParametersSimulation
+    infected_states_probs::AbstractVector{Float32}  # Permitir diferentes tipos de vectores
+    distribution_states_agent::Categorical
+    get_agent_state::Function
+    interval_between_infected::Int16
+    prob_infect::Float32
+    max_radius_infected::Int16
+    max_infected::Int16
+    size_agent::Int8
+    num_agents::Int16
+    height::Int16
+    width::Int16
+    initial_infected::Int16
+    speed_infected::Int8
+    speed_healthy::Int8
+    time_rate::Float32
 
-begin 
+    function ParametersSimulation(
+        infected_states_probs::AbstractVector{Float32},
+        interval_between_infected::Int16,
+        prob_infect::Float32,
+        max_radius_infected::Int16,
+        max_infected::Int16,
+        size_agent::Int8,
+        num_agents::Int16,
+        height::Int16,
+        width::Int16,
+        initial_infected::Int16,
+        speed_infected::Int8,
+        speed_healthy::Int8,
+        time_rate::Float32;
+    )
+        # Validaciones
+        @assert 0 <= prob_infect <= 1 "La probabilidad de infección debe estar entre 0 y 1"
+        @assert initial_infected <= num_agents "Los infectados iniciales no pueden exceder el número total de agentes"
 
-const infected_states_probs::Vector{Float32} = 
-#  healthy  infected  inmunized  dead
-   [0.001,      1 - 2* 0.001 - 0.1,     0.001,     0.1]  # infected
+        # Función para obtener el estado del agente
+        distribution_states_agent = Categorical(infected_states_probs)
+        get_agent_state = () -> STATES[rand(distribution_states_agent)]
 
-const DISTR_AGENT_STATE = Categorical(infected_states_probs)
+        return new(
+            infected_states_probs,
+            distribution_states_agent,
+            get_agent_state,
+            interval_between_infected,
+            prob_infect,
+            max_radius_infected,
+            max_infected,
+            size_agent,
+            num_agents,
+            height,
+            width,
+            initial_infected,
+            speed_infected,
+            speed_healthy,
+            time_rate
+        )
+    end
+end
 
-@inline const GET_AGENT_STATE() = STATES[rand(DISTR_AGENT_STATE)]
-# solo hay una forma de pasar de sano a infectado
+# Resto del código sin cambios
+infected_states_probs ::Vector{Float32} = 
+   [0.001, 1 - 2*0.001 - 0.1, 0.001, 0.1]
 
+interval_between_infected::Int16 = 10
+prob_infect::Float32 = 0.9
+max_radius_infected::Int16 = 50
+max_infected::Int16 = 4
+size_agent::Int8 = 30
+num_agents::Int16 = 20
+height::Int16 = 800
+width::Int16 = 1300
+initial_infected::Int16 = 1
+speed_infected::Int8, speed_healthy::Int8 = 10, 100
+time_rate::Float32 = 60
 
-const interval_beetween_infected::Int16 = 10 # 60 is a 1 one seg 
+params = ParametersSimulation(
+    infected_states_probs,
+    interval_between_infected,
+    prob_infect,
+    max_radius_infected,
+    max_infected,
+    size_agent,
+    num_agents,
+    height,
+    width,
+    initial_infected,
+    speed_infected,
+    speed_healthy,
+    time_rate
+)
 
-const prob_infect::Float32 = 0.9
-
-const max_radius_infected = 50
-
-const max_infected::Int16 = 4
-
-const size_agent::Int8 = 20
-
-const num_agents::Int16 = 10
-
-const Height::Int16 = 1200
-
-const Width::Int16 = 1200
-
-const initial_infected::Int16 = 2
-
-const speed_infected::Int8, speed_healthy::Int8 = 20, 100
-
-const time_rate::Float32 = 60
-
-end 
 
 mutable struct VelocityVector
     x::Float32
@@ -69,6 +125,12 @@ mutable struct VelocityVector
     end
 
     function VelocityVector(x::Float32, y::Float32, speed::Int8)
+
+        x = x / sqrt(x^2 + y^2)
+        y = y / sqrt(x^2 + y^2)
+
+        x = speed * x 
+        y = speed * y
 
         return new(x, y, speed)
     end
@@ -97,15 +159,15 @@ mutable struct Agent
     time_infected::Int32 # measured in frames
 end 
 
-function check_wall_collission(agents::Vector{Agent})
+function check_wall_collission(agents::Vector{Agent}, params::ParametersSimulation)
     for agent in agents
         if agent.state == DEAD
             continue
         end
-        if agent.x < 0 || agent.x > Width
+        if agent.x - params.size_agent < 0 || agent.x > params.width - params.size_agent
             agent.velocity_vector.x = -agent.velocity_vector.x
         end
-        if agent.y < 0 || agent.y > Height
+        if agent.y - params.size_agent < 0 || agent.y > params.height - params.size_agent
             agent.velocity_vector.y = -agent.velocity_vector.y
         end
     end 
@@ -119,7 +181,7 @@ function update_velocities_on_collision(agent1::Agent, agent2::Agent)
 end
 
 
-function get_pair_on_collision(matrix_distances::Matrix{Float32})
+function get_pair_on_collision(matrix_distances::Matrix{Float32}, params::ParametersSimulation)
 
     index_agents_collision = []
 
@@ -127,7 +189,7 @@ function get_pair_on_collision(matrix_distances::Matrix{Float32})
 
     for i in 1:n
         for j in i+1:n
-            if matrix_distances[i, j] < size_agent
+            if matrix_distances[i, j] < 2*params.size_agent
                 push!(index_agents_collision, (i, j))
             end
         end
@@ -136,24 +198,25 @@ function get_pair_on_collision(matrix_distances::Matrix{Float32})
 
 end
 
+
 # include wall colissions
-function update_velocities_on_collision(agents::Vector{Agent}, matrix_distances::Matrix{Float32})
-    index_agents_collision = get_pair_on_collision(matrix_distances)
+function update_velocities_on_collision(agents::Vector{Agent}, matrix_distances::Matrix{Float32}, params::ParametersSimulation)
+    index_agents_collision = get_pair_on_collision(matrix_distances, params)
 
     for (i, j) in index_agents_collision
         update_velocities_on_collision(agents[i], agents[j])
     end
 
-    check_wall_collission(agents)
+    check_wall_collission(agents, params)
 end
 
-function update_positions(agents::Array{Agent})
+function update_positions(agents::Array{Agent}, params::ParametersSimulation)
     for agent in agents
         if agent.state == DEAD
             continue
         end
-        agent.x += agent.velocity_vector.x * (1 / time_rate) 
-        agent.y += agent.velocity_vector.y * (1 / time_rate)
+        agent.x += agent.velocity_vector.x * (1 / params.time_rate) 
+        agent.y += agent.velocity_vector.y * (1 / params.time_rate)
     end
 end
 
@@ -162,13 +225,13 @@ function distance(a1::Agent, a2::Agent)
 end
 
 
-function update_states(agents::Array{Agent}, matrix_adjacency::Matrix{Bool}, matrix_distances::Matrix{Float32}, time::Int64)
+function update_states(agents::Array{Agent}, matrix_adjacency::Matrix{Bool}, matrix_distances::Matrix{Float32}, time::Int64, params::ParametersSimulation)
 
 
     function infect_agents(agent)
         # infecta a todos los que se encuentran en la matriz de adyacencia
         @inbounds for i in 1:length(agents)
-            if matrix_adjacency[agent, i] && agents[i].state == HEALTHY && matrix_distances[agent, i] < max_radius_infected
+            if matrix_adjacency[agent, i] && agents[i].state == HEALTHY && matrix_distances[agent, i] < params.max_radius_infected
                 agents[i].state = INFECTED
             end
         end
@@ -177,12 +240,12 @@ function update_states(agents::Array{Agent}, matrix_adjacency::Matrix{Bool}, mat
     for i in 1:length(agents)
         if agents[i].state == INFECTED
             agents[i].time_infected += 1
-            if time % time_rate == 0
-                state = GET_AGENT_STATE()
+            if time % params.time_rate == 0
+                state = params.get_agent_state()
                 agents[i].state = state
             end
             if agents[i].state == INFECTED
-                if rand() < prob_infect && agents[i].time_infected % interval_beetween_infected == 0
+                if rand() < params.prob_infect && agents[i].time_infected % params.interval_between_infected == 0
                     infect_agents(i)
                 end
             end 
@@ -191,22 +254,22 @@ function update_states(agents::Array{Agent}, matrix_adjacency::Matrix{Bool}, mat
 end
 
 
-function generate_agents(n::Int16, x_max::Int16, y_max::Int16, num_infected::Int16, speed_infected::Int8, speed_healthy::Int8)
+function generate_agents(params::ParametersSimulation)
     agents = []
 
-    for i in 1:n-num_infected
-        x::Float32 = rand() * x_max
-        y::Float32 = rand() * y_max
+    for i in 1:params.num_agents-params.initial_infected
+        x::Float32 = rand() * (params.width - 2*params.size_agent)
+        y::Float32 = rand() * (params.height - 2*params.size_agent)
         state = HEALTHY
-        velocity_vector = VelocityVector(speed_healthy)
+        velocity_vector = VelocityVector(params.speed_healthy)
         push!(agents, Agent(x, y, state, velocity_vector, 0))
     end
 
-    for i in 1:num_infected
-        x = rand() * x_max
-        y = rand() * y_max
+    for i in 1:params.initial_infected
+        x = rand() * (params.width - 2*params.size_agent)
+        y = rand() *  (params.height - 2*params.size_agent)
         state = INFECTED
-        velocity_vector = VelocityVector(speed_infected)
+        velocity_vector = VelocityVector(params.speed_infected)
         push!(agents, Agent(x, y, state, velocity_vector, 0))
     end
 
@@ -236,7 +299,7 @@ mutable struct AdjacencyMatrixGraph
     angents::Array{Agent}
     matrix::Matrix{Bool}
 
-    function AdjacencyMatrixGraph(agents::Vector{Agent}, max_infected::Int16)
+    function AdjacencyMatrixGraph(agents::Vector{Agent}, params::ParametersSimulation)
         x_points = [agent.x for agent in agents]
         y_points = [agent.y for agent in agents]
 
@@ -246,7 +309,7 @@ mutable struct AdjacencyMatrixGraph
 
         kd_tree = KDTree(xy_points)
 
-        indices, distances = knn(kd_tree, xy_points, Int64(max_infected), true)
+        indices, distances = knn(kd_tree, xy_points, Int64(params.max_infected), true)
 
         @inbounds for ind in indices
             row = ind[1]
@@ -259,7 +322,6 @@ mutable struct AdjacencyMatrixGraph
 
     end
 end
-
 
 
 mutable struct FrameSimulation
@@ -284,25 +346,25 @@ mutable struct FrameSimulation
 end
 
 
-function generate_simulation(path_simulation::AbstractString, time_seg::Int64)
-    agents::Vector{Agent} = generate_agents(num_agents, Width, Height, initial_infected, speed_infected, speed_healthy)
+function generate_simulation(path_simulation::AbstractString, time_seg::Int64, params::ParametersSimulation)
+    agents::Vector{Agent} = generate_agents(params)
     matrix_distances = MatrixDistances(agents)
-    matrix_adjacency = AdjacencyMatrixGraph(agents, max_infected)
+    matrix_adjacency = AdjacencyMatrixGraph(agents, params)
     frame_simulation = FrameSimulation(agents, matrix_adjacency.matrix, 0)
 
     JLD2.jldopen(path_simulation, "w") do file
         file["frame_simulation_0"] = frame_simulation
-        file["WIDTH"] = Width
-        file["HEIGHT"] = Height
-        file["SIZE_AGENT"] = size_agent
+        file["WIDTH"] = params.width
+        file["HEIGHT"] = params.height
+        file["SIZE_AGENT"] = params.size_agent
     end
 
     for i in 1:time_seg * 60
-        update_positions(agents)
-        update_velocities_on_collision(agents, matrix_distances.matrix)
-        update_states(agents, matrix_adjacency.matrix, matrix_distances.matrix, i)
-        matrix_adjacency = AdjacencyMatrixGraph(agents, max_infected)
+        update_positions(agents, params)
         matrix_distances = MatrixDistances(agents)
+        update_velocities_on_collision(agents, matrix_distances.matrix, params)
+        update_states(agents, matrix_adjacency.matrix, matrix_distances.matrix, i, params)
+        matrix_adjacency = AdjacencyMatrixGraph(agents, params)
 
         frame_simulation = FrameSimulation(agents, matrix_adjacency.matrix, i)
 
@@ -315,9 +377,7 @@ end
 
 
 
-@time generate_simulation("simulations/sim_3.jld2", 10000)
-
-simulacion = load("simulations/sim_3.jld2")
+@time generate_simulation("simulations/sim_2.jld2", 5, params)
 
 using GameZero
 rungame("run.jl")

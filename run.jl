@@ -23,7 +23,7 @@ const AGENT_COLORS = Dict([
     :infected => RGB(.8, .1, .1),
     :healthy => RGB(.1, .9, .1),
     :inmunized => RGB(.4, .6, .7),
-    :dead => RGB(0.1, 0.1, 0.1)
+    :dead => RGB(0.9, 0.9, 0.9)
 ])
 
 function draw_frame(frame, size_agent)
