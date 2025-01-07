@@ -3,7 +3,7 @@ using Colors
 
 BACKGROUND = colorant"black"
 
-global path_simulation = "simulations/sim_3.jld2"
+global path_simulation = "simulations/sim_2.jld2"
 global num_frame = 0 
 global simulation = load(path_simulation)
 WIDTH = simulation["WIDTH"]
