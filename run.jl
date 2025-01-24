@@ -1,5 +1,7 @@
 using JLD2
 using Colors
+using SparseArrays
+using CodecZlib
 
 BACKGROUND = colorant"black"
 

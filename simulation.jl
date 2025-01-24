@@ -1,10 +1,11 @@
 using NearestNeighbors
 using Distances 
 using Random
-using SparseArrays
 using JLD2
 using Distributions
 using Colors
+using CodecZlib
+using SparseArrays
 
 const HEALTHY = :healthy 
 const INFECTED = :infected
@@ -74,17 +75,18 @@ mutable struct ParametersSimulation
 end
 
 # Resto del código sin cambios
-infected_states_probs ::Vector{Float32} = 
-   [0.001, 1 - 2*0.001 - 0.1, 0.001, 0.1]
+infected_states_probs::Vector{Float32} = 
+   [0.01, 1 - 2*0.01 - .1, 0.01, 0.1]
+ # [HEALTHY, INFECTED,   INMUNIZED, DEAD]
 
-interval_between_infected::Int16 = 3
+interval_between_infected::Int16 = 30
 prob_infect::Float32 = 0.3
 max_radius_infected::Int16 = 50
 max_infected::Int16 = 3
-size_agent::Int8 = 10
-num_agents::Int16 = 300
+size_agent::Int8 = 7
+num_agents::Int16 = 500
 height::Int16 = 800
-width::Int16 = 1700
+width::Int16 = 1800
 initial_infected::Int16 = 2
 speed_infected::Int8, speed_healthy::Int8 = 2, 50
 time_rate::Float32 = 30
@@ -137,6 +139,8 @@ mutable struct VelocityVector
 
 end
 
+const G = VelocityVector(Float32(0.0), Float32(0.1), Int8(1)) # effect of gravity
+
 
 function normalize(v::VelocityVector)
     v.x = v.x / √(v.x^2 + v.y^2)
@@ -179,6 +183,8 @@ function update_velocities_on_collision(agent1::Agent, agent2::Agent)
     agent2.velocity_vector = agent2.velocity_vector + agent1.velocity_vector
 
 end
+
+
 
 function defined_angle(angulo_auxiliar, x1, y1, x2=0, y2=0)
     # Calcula el ángulo según los cuadrantes
@@ -234,170 +240,158 @@ function get_pair_on_collision(matrix_distances::Matrix{Float32}, params::Parame
 
 end
 
-
-function definir_angulo(angulo_auxiliar,vx,vy)
-    angulo = 0 
-    if vx>=0 && vy>=0
-        angulo = angulo_auxiliar 
+# Calculate the absolute or relative angle of a vector based on its components or coordinates
+function compute_vector_angle(aux_angle::Float32, vx::Float32, vy::Float32; is_relative::Bool=false, coord1::Union{Vector{Float32}, Nothing}=nothing, coord2::Union{Vector{Float32}, Nothing}=nothing)::Float32
+    """
+    Compute the absolute or relative angle of a vector.
+    
+    Parameters:
+    - aux_angle: Precomputed angle (e.g., using `asin` or `atan`).
+    - vx, vy: Components of the vector (for absolute angle) or coordinates (for relative angle).
+    - is_relative: If true, computes the relative angle between two coordinates.
+    - coord1, coord2: Coordinates of two points (required if `is_relative=true`).
+    
+    Returns:
+    - The adjusted angle in the range [0, 2π].
+    """
+    if is_relative
+        # Compute relative angle between two coordinates
+        if coord2[2] >= coord1[2] && coord2[1] >= coord1[1]
+            return aux_angle
+        elseif coord2[2] >= coord1[2] && coord1[1] >= coord2[1]
+            return Float32(π) - aux_angle
+        elseif coord1[2] >= coord2[2] && coord1[1] >= coord2[1]
+            return Float32(π) + aux_angle
+        else
+            return Float32(2π) - aux_angle
+        end
+    else
+        # Compute absolute angle of a vector
+        if vx >= 0 && vy >= 0
+            return aux_angle
+        elseif vx <= 0 && vy >= 0
+            return Float32(π) - aux_angle
+        elseif vx <= 0 && vy <= 0
+            return Float32(π) + aux_angle
+        else
+            return Float32(2π) - aux_angle
+        end
     end
-    if vx<=0 && vy>=0
-        angulo= pi - angulo_auxiliar 
-    end
-    if vx<=0 && vy<=0
-        angulo= pi + angulo_auxiliar 
-    end
-    if vx>=0 && vy<=0
-        angulo= 2*pi - angulo_auxiliar 
-    end
-
-    return angulo 
 end
 
+# Decompose a vector into directional and perpendicular components
+function decompose_velocity(magnitude::Float32, angle::Float32, reference_angle::Float32)::Tuple{Vector{Float32}, Vector{Float32}}
+    """
+    Decompose a velocity vector into directional and perpendicular components.
+    
+    Parameters:
+    - magnitude: Magnitude of the velocity vector.
+    - angle: Angle of the velocity vector.
+    - reference_angle: Reference angle for decomposition (e.g., collision angle).
+    
+    Returns:
+    - A tuple containing the directional and perpendicular components.
+    """
+    if sin(angle - reference_angle) <= 0
+        return ([0.0f0, 0.0f0], [magnitude * cos(angle), magnitude * sin(angle)])
+    end
 
-function definir_angulo_2(angulo_aux,cor1,cor2)
-    angulo=0
-    if cor2[2]>=cor1[2] && cor2[1]>=cor1[1]
-        angulo=angulo_aux
-    end
-    if cor2[2]>=cor1[2] && cor1[1]>=cor2[1]
-        angulo=pi -angulo_aux
-    end
-    if cor1[2]>=cor2[2] && cor1[1]>=cor2[1]
-        angulo= pi + angulo_aux
-    end
-    if cor1[2]>=cor2[2] && cor2[1]>=cor1[1]
-        angulo=2*pi - angulo_aux
-    end
-    return angulo
+    dir_magnitude = abs(magnitude * sin(angle - reference_angle))
+    perp_magnitude = abs(magnitude * cos(angle - reference_angle))
+
+    directional = [dir_magnitude * cos(Float32(π / 2) + reference_angle), dir_magnitude * sin(Float32(π / 2) + reference_angle)]
+    perpendicular = [perp_magnitude * cos(reference_angle), perp_magnitude * sin(reference_angle)]
+
+    return (directional, perpendicular)
 end
 
+# Combine vectors to simulate velocity change during collision
+function compute_resultant_velocity(original_velocity::Vector{Float32}, component1::Vector{Float32}, component2::Vector{Float32})::Vector{Float32}
+    """
+    Combine two velocity components to simulate the resultant velocity after a collision.
+    
+    Parameters:
+    - original_velocity: Original velocity vector (before collision).
+    - component1, component2: Velocity components to combine.
+    
+    Returns:
+    - The resultant velocity vector with the same magnitude as `original_velocity`.
+    """
+    resultant = [component1[1] + component2[1], component1[2] + component2[2]]
+    resultant_magnitude = Float32(sqrt(resultant[1]^2 + resultant[2]^2))
+    resultant_angle_aux = Float32(asin(abs(resultant[2] / resultant_magnitude)))
+    resultant_angle = compute_vector_angle(resultant_angle_aux, resultant[1], resultant[2])
 
+    original_magnitude = Float32(sqrt(original_velocity[1]^2 + original_velocity[2]^2))
+    vx = original_magnitude * cos(resultant_angle)
+    vy = original_magnitude * sin(resultant_angle)
 
-function cambio_angular(m0,m1,m2)
-    mr=[m1[1]+ m2[1],m1[2]+m2[2]]
-    __mr__=sqrt((mr[1]^2 + mr[2]^2))
-    angulo_mr_a=asin(abs(mr[2]/__mr__))
-    angulo_mr = definir_angulo(angulo_mr_a,mr[1],mr[2])
-    __m0__ = sqrt((m0[1])^2+(m0[2])^2)
-    vx =__m0__*cos(angulo_mr)
-    vy = __m0__*sin(angulo_mr)
-    return [vx,vy]
-
+    return [vx, vy]
 end
 
-
-function elastic_collision!(a1::Agent, a2::Agent)
-    ############################# haremos una consideracion, si uno de ellos tiene los vectores anlados el mantiene la misma direccion y el que los
-    #tenia anuladossiguen anulados 
-    if a1.x == 0 && a1.y == 0
+# Simulate an elastic collision between two agents
+function elastic_collision!(agent1::Agent, agent2::Agent)
+    """
+    Simulate an elastic collision between two agents.
+    
+    Parameters:
+    - agent1, agent2: Agents with `x`, `y`, and `velocity_vector` fields.
+    
+    Updates:
+    - The velocities of `agent1` and `agent2` after the collision.
+    """
+    # Skip if either agent is at the origin
+    if (agent1.x == 0 && agent1.y == 0) || (agent2.x == 0 && agent2.y == 0)
         return nothing
     end
 
-    if a2.x == 0 && a2.y == 0
-        return nothing
-    end
+    # Extract positions and velocities
+    position1 = [agent1.x, agent1.y]
+    position2 = [agent2.x, agent2.y]
+    velocity1 = [agent1.velocity_vector.x, agent1.velocity_vector.y]
+    velocity2 = [agent2.velocity_vector.x, agent2.velocity_vector.y]
 
-    cor1 = [a1.x, a1.y]
-    cor2 = [a2.x, a2.y]
-    m1 = [a1.velocity_vector.x, a1.velocity_vector.y]
-    m2 = [a2.velocity_vector.x, a2.velocity_vector.y]
-    
-    
-    ######### primero definiremos a los angulos ##############
-    longitud_vector_1=sqrt(m1[1]^2 + m1[2]^2)
-    theta1_auxiliar=asin(abs(m1[2]/longitud_vector_1))
-    theta1=definir_angulo(theta1_auxiliar,m1[1],m1[2])
+    # Compute angles for both agents' velocities
+    velocity1_magnitude = Float32(sqrt(velocity1[1]^2 + velocity1[2]^2))
+    theta1_aux = Float32(asin(abs(velocity1[2] / velocity1_magnitude)))
+    theta1 = compute_vector_angle(theta1_aux, velocity1[1], velocity1[2])
 
+    velocity2_magnitude = Float32(sqrt(velocity2[1]^2 + velocity2[2]^2))
+    theta2_aux = Float32(asin(abs(velocity2[2] / velocity2_magnitude)))
+    theta2 = compute_vector_angle(theta2_aux, velocity2[1], velocity2[2])
 
+    # Compute relative angles between agents
+    distance = Float32(sqrt((position1[1] - position2[1])^2 + (position1[2] - position2[2])^2))
+    alpha_aux = Float32(asin(abs((position1[2] - position2[2]) / distance)))
+    alpha1 = compute_vector_angle(alpha_aux, position1[1] - position2[1], position1[2] - position2[2]; is_relative=true, coord1=position1, coord2=position2)
+    omega1 = alpha1 - Float32(π / 2)
 
-    distancia_entre_particulas=sqrt((cor1[1]-cor2[1])^2 + (cor1[2]-cor2[2])^2)
-    alpha1_auxiliar= asin(abs((cor1[2]-cor2[2])/distancia_entre_particulas))
-    alpha1=definir_angulo_2(alpha1_auxiliar,cor1,cor2)
-    # es importante recalcar que para la particula 1, en los argumentos las coordenadas1 deben ir primero
-    # por que se estan haciendo relativo a ella 
-    omega1= alpha1 - pi/2 
-    ## particula de los modulos m1 
-    longitud_vector_2=sqrt(m2[1]^2 + m2[2]^2)
-    theta2_auxiliar=asin(abs(m2[2]/longitud_vector_2))
-    theta2=definir_angulo(theta2_auxiliar,m2[1],m2[2])
-    
+    alpha2 = compute_vector_angle(alpha_aux, position2[1] - position1[1], position2[2] - position1[2]; is_relative=true, coord1=position2, coord2=position1)
+    omega2 = alpha2 - Float32(π / 2)
 
-    ## una consideracion a tener en cuenta es que alpha1_auxiliar es igual a alpha2_auxiliar 
-    alpha2_auxiliar= alpha1_auxiliar
-    alpha2 = definir_angulo_2(alpha2_auxiliar,cor2,cor1)
-    #### si nos fijamos aqui se invirtieron papeles con los argumentos 
-    omega2= alpha2 - pi/2 
-    ## particula de los modulos m2
-    
-    # hay que hacer un programa que al momento de rotar un angulo omega, nos regrese el vector que apunte 
-    # al centro de la otra particula y su perpendicular 
-    # para un mejor contexto definamos de otra manera las variables como
-    __m1__ = longitud_vector_1
-    __m2__ = longitud_vector_2
+    # Decompose velocity vectors
+    dir1, perp1 = decompose_velocity(velocity1_magnitude, theta1, omega1)
+    dir2, perp2 = decompose_velocity(velocity2_magnitude, theta2, omega2)
 
-    # por lo que las nuevas coordenadas en x y y de los modulos 1 y 2 respecto a ellas serian, __m1__*cos(theta1-omega1) y __m2__*sen(theta2-omega2)
-    # el modulo 1 por el sen con el angulo invertido me da el modulo del vector direccional y el modulo1 por el cos del angulo invertido me da el modulo perpendicular
-    # y asi para la particula 2, por lo que me queda solo obtener el valor en x y en y de dos modulos cuyos valores ya se y que el direccional se encuentra a un angulo de 90 + omega y el
-    # perpedicular se encuentra a un angulo de omega o 180 + omega 
+    # Compute new velocities after collision
+    new_velocity1 = compute_resultant_velocity(velocity1, perp1 .- dir1, dir2)
+    new_velocity2 = compute_resultant_velocity(velocity2, perp2 .- dir2, dir1)
 
-    #     
-    
-    # primero, obtengamos al vector direccional y su perpendicular de la particula 1
-    # primero, si el vector direccional no apunta hacia el centro no se hace nada y el vector direccional se hace cero y el 
-    # perpendicular lo tomas como el mismo, una manera de saber esto es si el sen(theta-omega)<=0
-    if sin(theta1-omega1)<=0
-        md1=[0,0]
-        mp1=m1 
-    else
-        # para modulo direccional
-        __md1__ = abs(__m1__*sin(theta1-omega1))
-        md1=[__md1__*cos(pi/2 + omega1),__md1__*sin(pi/2 + omega1)]
-
-        # para el vector perpendicular 
-        __mp1__ = abs(__m1__*cos(theta1-omega1))
-        
-        if cos(theta1-omega1)<=0
-            mp1=[__mp1__*cos(omega1 + pi), __mp1__*sin(omega1 + pi )]
-        else
-            mp1 = [__mp1__*cos(omega1),__mp1__*sin(omega1)]
-        end
-    end
-    
-    ## para la particula 2
-
-    if sin(theta2-omega2)<=0
-        md2=[0,0]
-        mp2=m2 
-    else
-        # para modulo direccional
-        __md2__ = abs(__m2__*sin(theta2-omega2))
-        md2=[__md2__*cos(pi/2 + omega2),__md2__*sin(pi/2 + omega2)]
-
-        # para el vector perpendicular 
-        __mp2__ = abs(__m2__*cos(theta2-omega2))
-        
-        if cos(theta2-omega2)<=0
-            mp2=[__mp2__*cos(omega2 + pi), __mp2__*sin(omega2 + pi )]
-        else
-            mp2 = [__mp2__*cos(omega2),__mp2__*sin(omega2)]
-        end
-    end
-
-
-    # por lo que ya obtuvimos como informacion a los vectores md1 y mp1 e md2 y mp2 
-
-    # ya por ultimo lo que debemos hacer es hacer elcmabio angular de m1 y m2 usando como suma ordinaria de vectores,
-    # para la particula 1
-
-    modulos_1=cambio_angular(m1,[(mp1-md1)[1],(mp1-md1)[2]],[md2[1],md2[2]])
-    modulos_2=cambio_angular(m2,[(mp2-md2)[1],(mp2-md2)[2]],[md1[1],md1[2]])
- 
-    a1.velocity_vector.x = Float32(modulos_1[1])
-    a2.velocity_vector.x = Float32(modulos_2[1])
-
-    a1.velocity_vector.y = Float32(modulos_1[2])
-    a2.velocity_vector.y = Float32(modulos_2[2])
+    # Update agent velocities
+    agent1.velocity_vector.x = new_velocity1[1]
+    agent1.velocity_vector.y = new_velocity1[2]
+    agent2.velocity_vector.x = new_velocity2[1]
+    agent2.velocity_vector.y = new_velocity2[2]
 end
+
+"""
+update the velocity vector that effect on gravity when an agent is dead
+
+"""
+function gravity_on_agent_dead!(agent::Agent, params::ParametersSimulation)
+    agent.velocity_vector = agent.velocity_vector + G
+end
+
 
 
 # include wall colissions
@@ -413,11 +407,13 @@ end
 
 
 
-
 function update_positions(agents::Array{Agent}, params::ParametersSimulation)
     for agent in agents
-        if agent.state == DEAD
-            continue
+        if agent.state == DEAD 
+            if agent.y >= params.width - params.size_agent
+                continue 
+            end 
+            gravity_on_agent_dead!(agent, params)
         end
         agent.x += agent.velocity_vector.x * (1 / params.time_rate) 
         agent.y += agent.velocity_vector.y * (1 / params.time_rate)
@@ -461,7 +457,9 @@ end
 function generate_agents(params::ParametersSimulation)
     agents = []
 
-    for i in 1:params.num_agents-params.initial_infected
+    num_agents_non_infected = params.num_agents-params.initial_infected
+
+    for _ in 1:num_agents_non_infected
         x::Float32 = rand() * (params.width - 2*params.size_agent)
         y::Float32 = rand() * (params.height - 2*params.size_agent)
         state = HEALTHY
@@ -469,7 +467,7 @@ function generate_agents(params::ParametersSimulation)
         push!(agents, Agent(x, y, state, velocity_vector, 0))
     end
 
-    for i in 1:params.initial_infected
+    for _ in 1:params.initial_infected
         x = rand() * (params.width - 2*params.size_agent)
         y = rand() *  (params.height - 2*params.size_agent)
         state = INFECTED
@@ -535,7 +533,7 @@ end
 
 
 mutable struct FrameSimulation
-    matrix_points::Matrix{Float32}
+    matrix_points::Matrix{Float16}
     states::Vector{Symbol}
     graph_matrix::AbstractMatrix{Bool}
     time::Int64
@@ -582,15 +580,13 @@ function generate_simulation(path_simulation::AbstractString, time_seg::Int64, p
 
         frame_simulation = FrameSimulation(agents, matrix_adjacency.matrix, i)
 
-        JLD2.jldopen(path_simulation, "a") do file
+        jldopen(path_simulation, "a"; compress=true) do file
             file["frame_simulation_$i"] = frame_simulation
         end
     end
-
 end
 
-@time generate_simulation("simulations/sim_2.jld2", 50, params)
+@time generate_simulation("simulations/sim_2.jld2", 30, params)
 
 using GameZero
 rungame("run.jl")
-
